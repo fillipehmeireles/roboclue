@@ -1,9 +1,9 @@
-import httpclient
-import strutils
-import asyncdispatch
-import os
-import strformat
-
+import std/httpclient
+import std/strutils
+import std/asyncdispatch
+import std/os
+import std/strformat
+import std/parseopt
 const
   B_MAGENTA = "\e[95m"
   B_GREEN = "\e[92m"
@@ -16,14 +16,15 @@ const
 
 proc banner() =
   echo fmt"{B_CYAN}      {PROGRAM_NAME} {RESET} - {B_GREEN} Fast robots.txt audit {RESET}"
-  echo fmt"Version:{B_GREEN} 1.0 {RESET}"
+  echo fmt"Version:{B_GREEN} 2.0 {RESET}"
   echo fmt"Author:{B_MAGENTA}  Nong Hoang Tu {RESET}"
-  echo fmt"Gitlab:{B_BLUE}  https://nest.parrot.sh/packages/tools/roboclue  {RESET}"
+  echo fmt"Contributors: {B_MAGENTA} Fillipe Meireles; PalinuroSec {RESET}"
+  echo fmt"Github:{B_BLUE}  https://github.com/ParrotSec/roboclue {RESET}"
   echo fmt"License:{B_GREEN} GPL-2"
 
 
 proc usage() =
-  echo fmt"{B_RED}Usage: {B_CYAN}{PROGRAM_NAME} {RESET}[{B_BLUE}-t delayTime{RESET}] <{B_MAGENTA}URL or -f urlList{RESET}>"
+  echo fmt"{B_RED}Usage: {B_CYAN}{PROGRAM_NAME} {RESET}[{B_BLUE}-t=delayTime{RESET}] [{B_MAGENTA}-u=https://example.com or -f=/path/to/url_list{RESET}]"
 
 
 proc help() =
@@ -42,6 +43,8 @@ proc formatURL(url: string): string =
 
 proc addRobotToUrl(url: string): string =
   result = url
+  if not url.endsWith("/"):
+    result &= "/"
   if not url.endsWith("robots.txt"):
     result &= "robots.txt"
   return result
@@ -57,17 +60,30 @@ proc checkSleepTime(t: string): int =
   except:
     return 0
 
+proc checkSitemap(line: string) =
+  if line.startsWith("Sitemap:"):
+    let url = line.split(": ")[1]
+    echo fmt"{B_CYAN} [*] Sitemap captured: {url} {RESET}"
 
 proc checkRobot(url: string, delay = 0) =
-  let
-    client = newAsyncHttpClient()
-  echo B_CYAN, "[*] Checking robots.txt", RESET
-  let
-    resp = waitfor client.get(addRobotToUrl(url))
-  if resp.status.startsWith("200"):
-    echo B_GREEN, addRobotToUrl(url), " ", resp.status, RESET
+  try:
+    let
+      client = newAsyncHttpClient()
+    defer: client.close()
+    echo fmt"{B_CYAN} [*] Checking robots.txt {RESET}"
+    
+    let 
+      targetUrl = addRobotToUrl(url)
+    let
+      resp = waitfor client.get(targetUrl)
+    if resp.code != Http200:
+      echo B_RED, targetUrl, " ", resp.code, RESET
+      return
+
+    echo B_GREEN, targetUrl, " ", resp.code, RESET
     echo B_CYAN, "[*] Checking URL from robots.txt", RESET
     for line in waitfor(resp.body).split("\n"):
+      checkSitemap(line)
       if line.startsWith("Disallow:") or line.startsWith("Allow:"):
         if ": /" in line:
           let
@@ -86,58 +102,47 @@ proc checkRobot(url: string, delay = 0) =
               echo B_MAGENTA, checkBranch, " ", respcheckBranch.status, RESET
             if delay > 0:
               sleep(delay * 1000)
-  else:
-    echo B_RED, addRobotToUrl(url), " ", resp.status, RESET
-  client.close()
+  except OSError as e:
+    echo fmt"{B_RED} [!] Error on request. Error code: OSError({e.errorCode}) {RESET}"
 
 
-proc getUserOptions() =
+proc cli() =
   var
-    url, filePath = ""
-    setDelay = "0"
-  if paramCount() == 0:
-    help()
-  elif paramCount() == 1:
-    case paramStr(1)
-    of "-h":
-      help()
-    of "--help":
-      help()
-    of "-help":
-      help()
-    of "help":
-      help()
+    url: string
+    filePath: string
+    delay: string
+  for kind, key, value in getOpt():
+    case kind:
+    of cmdArgument:
+      discard
+    of cmdLongOption, cmdShortOption:
+      case key:
+      of "h", "help":
+        help()
+        quit()
+      of "u","url":
+        url = value
+      of "t":
+        delay = value
+      of "f", "file":
+        filePath = value
+      else:
+        echo fmt"{B_RED} Unknown option: {key} {RESET}"
+        usage()
+    of cmdEnd:
+      discard
+  if filePath == "" and url == "":
+    echo B_RED, "[x] No URL was provided!", RESET
+    usage()
+  if filePath != "" and url == "":
+    if fileExists(filePath):
+      for line in lines(filePath):
+        if not isEmptyOrWhitespace(line):
+          checkRobot(formatURL(line), checkSleepTime(delay))
     else:
-      url = formatURL(paramStr(1))
-      checkRobot(url, checkSleepTime(setDelay))
-  else:
-    var i = 1
-    while i < paramCount():
-      if paramStr(i) == "-f":
-        filePath = paramStr(i + 1)
-        i += 1
-      elif paramStr(i) == "-t":
-        setDelay = paramStr(i + 1)
-        i += 1
-      else:
-        url = formatURL(paramStr(i))
-      i += 1
+      echo B_RED, "[x] File not found! ", filePath, RESET
+  elif url != "":
+    checkRobot(formatURL(url), checkSleepTime(delay))
 
-    if url == "" and filePath == "":
-      echo B_RED, "[x] No URL was provided!", RESET
-      usage()
-    if url != "":
-      banner()
-      checkRobot(url, checkSleepTime(setDelay))
-    elif filePath != "":
-      if fileExists(filePath):
-        banner()
-        for line in lines(filePath):
-          if not isEmptyOrWhitespace(line):
-            checkRobot(formatURL(line), checkSleepTime(setDelay))
-      else:
-        echo B_RED, "[x] File not found! ", filePath, RESET
-    # else:
-    #   echo B_RED, "[x] Invalid option!", RESET
-
-getUserOptions()
+when isMainModule:
+  cli()
